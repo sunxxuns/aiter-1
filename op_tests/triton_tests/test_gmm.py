@@ -62,7 +62,9 @@ REAL_SHAPES: list[tuple[int, int, int, int]] = [
 # fmt: on
 
 # Test shapes are test only + real ones.
-TEST_SHAPES: list[tuple[int, int, int, int]] = TEST_ONLY_SHAPES + REAL_SHAPES
+TEST_SHAPES: list[tuple[int, int, int, int]] = (
+    TEST_ONLY_SHAPES + REAL_SHAPES + [(267424, 1280, 2560, 32)]
+)
 
 
 # Transpositions.
