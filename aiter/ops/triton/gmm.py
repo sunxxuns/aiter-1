@@ -96,7 +96,8 @@ def gmm(
         lhs data type must be torch.float16 or torch.bfloat16, and must match rhs data type.
         lhs must be on the same device of rhs and group_sizes.
     rhs : torch.Tensor
-        Right-hand side 3D input tensor. Shape: (G, K, N).
+        Right-hand side 3D input tensor. Shape is (G, K, N) when rhs is non-transposed and (G, N, K)
+        when rhs is transposed. See Implementation Notes below for the supported stride combinations.
         rhs data type must be torch.float16 or torch.bfloat16, and must match lhs data type.
         rhs must be on the same device of lhs and group_sizes.
     group_sizes : torch.Tensor
@@ -131,11 +132,17 @@ def gmm(
     --------------------
     - GMM is implemented with a persistent Triton kernel.
     - lhs must be row-major (lhs.stride() == (K, 1)).
-    - rhs can be row-major (rhs.stride() == (K * N, N, 1)) or column-major (rhs.stride() ==
-      (K * N, 1, K)). If rhs is row-major then kernel parameter TRANS_RHS == False, this is useful
-      for implementing forward pass. If rhs is column-major then kernel parameter TRANS_RHS == True,
-      this is useful for computing the lhs derivative in the backward pass, while fusing the
-      transposition.
+    - rhs supports two storage layouts; both are row-major over their respective shapes
+      and share the same physical memory ordering (K varies fastest, then N, then G):
+        * Non-transposed: shape (G, K, N), stride (K*N, N, 1). Kernel parameter
+          TRANS_RHS == False. Useful for the forward pass.
+        * Transposed: shape (G, N, K), stride (K*N, K, 1). Kernel parameter
+          TRANS_RHS == True. Useful for computing the lhs derivative in the backward
+          pass while fusing the transposition.
+      OLD layout for the transposed case was shape (G, K, N) with column-major stride
+      (K*N, 1, K). That has been replaced by the row-major (G, N, K) form above. The
+      kernel's pointer arithmetic in the TRANS_RHS branch is unchanged because both
+      forms produce the same byte offsets.
     - out must be row-major (out.stride() == (N, 1)).
     - bias must be row-major (bias.stride() == (N, 1)) if provided.
     """

@@ -299,9 +299,15 @@ def gen_gmm_input(
     lhs = lhs.to(preferred_element_type)
 
     if trans_rhs:
-        rhs = torch.randn((G, N, K), dtype=torch.float32, device=device).permute(
-            0, 2, 1
-        )
+        # OLD layout: shape (G, K, N), stride (K*N, 1, K). Same physical memory as below,
+        # but interpreted as a column-major (K, N) sub-matrix per group.
+        # > rhs = torch.randn((G, N, K), dtype=torch.float32, device=device).permute(
+        # >     0, 2, 1
+        # > )
+        # NEW layout: shape (G, N, K), stride (K*N, K, 1). Row-major (N, K) sub-matrix
+        # per group. Physical memory ordering (K fastest, then N, then G) is identical
+        # to the OLD layout, only the tensor metadata (shape/stride) differs.
+        rhs = torch.randn((G, N, K), dtype=torch.float32, device=device)
     else:
         rhs = torch.randn((G, K, N), dtype=torch.float32, device=device)
     rhs = rhs.to(preferred_element_type)
@@ -381,13 +387,25 @@ def get_gmm_shape(
     ), f"group_sizes must have 1 dimension (it's {group_sizes.dim()})."
 
     M, lhs_k = lhs.shape
-    rhs_g, rhs_k, N = rhs.shape
+    # OLD interpretation: rhs was always shape (G, K, N).
+    # > rhs_g, rhs_k, N = rhs.shape
+    # NEW interpretation: rhs is shape (G, K, N) when not transposed, or (G, N, K)
+    # when transposed. K is taken from lhs to disambiguate.
+    rhs_g, rhs_d1, rhs_d2 = rhs.shape
+    K = lhs_k
+    if rhs_d1 == K:
+        # Non-transposed rhs: shape (G, K, N).
+        N = rhs_d2
+    elif rhs_d2 == K:
+        # Transposed rhs (new layout): shape (G, N, K).
+        N = rhs_d1
+    else:
+        raise AssertionError(
+            f"rhs shape {tuple(rhs.shape)} doesn't match K = {K} from lhs"
+            f" (expected (G, K, N) or (G, N, K))."
+        )
     group_sizes_g = group_sizes.shape[0]
 
-    assert (
-        lhs_k == rhs_k
-    ), f"K dimension of lhs and rhs don't match (lhs = {lhs_k}, rhs = {rhs_k})."
-    K = lhs_k
     assert (
         rhs_g == group_sizes_g
     ), f"G dimension of rhs and group_sizes don't match (rhs = {rhs_g}, group_sizes = {group_sizes_g})."
@@ -438,21 +456,33 @@ def get_gmm_transposition(lhs: Tensor, rhs: Tensor, out: Tensor) -> tuple[bool, 
     assert out.dim() == 2, f"out must have 2 dimensions (it's {out.dim()})."
 
     lhs_m, lhs_k = lhs.shape
-    G, rhs_k, rhs_n = rhs.shape
     out_m, out_n = out.shape
 
     assert (
         lhs_m == out_m
-    ), f"M dimension of lhs and out don't match (lhs = {lhs_m}, rhs = {out_m})."
+    ), f"M dimension of lhs and out don't match (lhs = {lhs_m}, out = {out_m})."
     M = lhs_m
-    assert (
-        lhs_k == rhs_k
-    ), f"K dimension of lhs and rhs don't match (lhs = {lhs_k}, rhs = {rhs_k})."
     K = lhs_k
-    assert (
-        rhs_n == out_n
-    ), f"N dimension of rhs and out don't match (lhs = {rhs_n}, rhs = {out_n})."
-    N = rhs_n
+    N = out_n
+
+    # OLD interpretation: rhs was always shape (G, K, N), transposition only affected stride.
+    # > G, rhs_k, rhs_n = rhs.shape
+    # > assert lhs_k == rhs_k, f"K dimension of lhs and rhs don't match (lhs = {lhs_k}, rhs = {rhs_k})."
+    # > K = lhs_k
+    # > assert rhs_n == out_n, f"N dimension of rhs and out don't match (rhs = {rhs_n}, out = {out_n})."
+    # > N = rhs_n
+    # > is_rhs_row_major = rhs.stride() == (K * N, N, 1)   # shape (G, K, N), row-major
+    # > is_rhs_col_major = rhs.stride() == (K * N, 1, K)   # shape (G, K, N), col-major (transposed)
+    # NEW interpretation: rhs has shape (G, K, N) when not transposed and (G, N, K)
+    # when transposed; the transposed layout is now expressed as a row-major (G, N, K)
+    # tensor (stride (K*N, K, 1)) instead of a column-major (G, K, N) tensor.
+    G, rhs_d1, rhs_d2 = rhs.shape
+    is_rhs_not_transposed_shape = (rhs_d1 == K) and (rhs_d2 == N)
+    is_rhs_transposed_shape = (rhs_d1 == N) and (rhs_d2 == K)
+    assert is_rhs_not_transposed_shape or is_rhs_transposed_shape, (
+        f"rhs shape {tuple(rhs.shape)} must be (G, K, N) = ({G}, {K}, {N}) or "
+        f"(G, N, K) = ({G}, {N}, {K})."
+    )
 
     assert M > 0, f"M must be positive, it's {M}."
     assert K > 0, f"K must be positive, it's {K}."
@@ -461,11 +491,18 @@ def get_gmm_transposition(lhs: Tensor, rhs: Tensor, out: Tensor) -> tuple[bool, 
 
     is_lhs_row_major = lhs.stride() == (K, 1)
     assert is_lhs_row_major, "lhs must be row-major."
-    is_rhs_row_major = rhs.stride() == (K * N, N, 1)
-    is_rhs_col_major = rhs.stride() == (K * N, 1, K)
-    assert (
-        is_rhs_row_major != is_rhs_col_major
-    ), "rhs must be row-major or column-major."
+    is_rhs_row_major = is_rhs_not_transposed_shape and rhs.stride() == (K * N, N, 1)
+    is_rhs_col_major = is_rhs_transposed_shape and rhs.stride() == (K * N, K, 1)
+    # When K == N, shape (G, K, N) and (G, N, K) are indistinguishable and so are
+    # their row-major strides. The two interpretations correspond to different
+    # mathematical operations (see TRANS_RHS branches in the kernel), so we cannot
+    # disambiguate from shape+stride alone in that case.
+    assert is_rhs_row_major != is_rhs_col_major, (
+        "rhs must be either non-transposed row-major (shape (G, K, N), stride (K*N, N, 1)) "
+        "or transposed row-major (shape (G, N, K), stride (K*N, K, 1)). "
+        f"Got shape {tuple(rhs.shape)}, stride {rhs.stride()}."
+        + (" Note: K == N makes the two layouts ambiguous." if K == N else "")
+    )
     is_out_row_major = out.stride() == (N, 1)
     assert is_out_row_major, "out must be row-major."
 

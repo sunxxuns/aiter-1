@@ -126,7 +126,7 @@ def torch_gmm(
 ) -> Tensor:
     check_input_device_dtype(lhs, rhs, group_sizes)
 
-    M, _, N, G = get_gmm_shape(lhs, rhs, group_sizes)
+    M, K, N, G = get_gmm_shape(lhs, rhs, group_sizes)
 
     out = get_gmm_output(
         M,
@@ -135,6 +135,12 @@ def torch_gmm(
         preferred_element_type=preferred_element_type,
         existing_out=existing_out,
     )
+
+    # OLD layout: rhs.shape was always (G, K, N), so rhs[g] is (K, N) directly.
+    # NEW layout: rhs.shape is (G, K, N) when not transposed and (G, N, K) when
+    # transposed. In the transposed case rhs[g] is (N, K) and we need .T to make
+    # the matmul (M, K) @ (K, N) valid.
+    is_rhs_transposed = rhs.shape[1] == N and rhs.shape[2] == K
 
     last_row = 0
 
@@ -148,7 +154,9 @@ def torch_gmm(
         start_idx = last_row
         end_idx = last_row + m
 
-        result = (lhs[start_idx:end_idx, :] @ rhs[g]).to(torch.float32)
+        # rhs_g is the (K, N) matrix for group g, regardless of storage layout.
+        rhs_g = rhs[g].T if is_rhs_transposed else rhs[g]
+        result = (lhs[start_idx:end_idx, :] @ rhs_g).to(torch.float32)
         if bias is not None:
             result += bias[g].to(torch.float32)
         out[start_idx:end_idx, :] = result.to(preferred_element_type)
