@@ -74,6 +74,7 @@ def gmm(
     existing_out: Tensor | None = None,
     config: dict[str, int] | None = None,
     bias: Tensor | None = None,
+    grid_dim: int | None = None,
 ) -> Tensor:
     """
     Perform Group Matrix Multiplication (GMM): out = lhs @ rhs + bias
@@ -147,6 +148,10 @@ def gmm(
     - out must be row-major (out.stride() == (N, 1)).
     - bias must be row-major (bias.stride() == (N, 1)) if provided.
     """
+    assert (grid_dim is None) or (
+        grid_dim > 0
+    ), f"Invalid grid dimension {grid_dim}. It must be None or a positive integer."
+
     use_bias = bias is not None
     check_input_device_dtype(lhs, rhs, group_sizes, bias)
 
@@ -167,6 +172,10 @@ def gmm(
 
     if config is None:
         config = get_config("gmm", M, K, N, G)
+
+    # Override grid dimension, if optional argument is provided.
+    if grid_dim is not None:
+        config["GRID_DIM"] = grid_dim
 
     assert all(
         key in config
