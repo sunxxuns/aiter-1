@@ -22,6 +22,11 @@ from aiter.ops.triton.utils.gmm_common import (
     dtype_from_str,
     DTYPE,
     str_from_dtype,
+    SUPPORTED_GROUP_SIZES_DTYPES_STR,
+    GROUP_SIZES_DTYPE_STR,
+    group_sizes_dtype_from_str,
+    GROUP_SIZES_DTYPE,
+    str_from_group_sizes_dtype,
     TRANS_LHS,
     TRANS_RHS,
     RNG_SEED,
@@ -122,6 +127,7 @@ def benchmark_gmm(
     use_bias: bool = False,
     accumulate: bool = False,
     output: bool = False,
+    group_sizes_dtype: torch.dtype = GROUP_SIZES_DTYPE,
 ) -> None:
     assert gmm_type in GMM_TYPES, "Invalid GMM type."
     assert metric in METRICS, "Invalid benchmark metric."
@@ -130,7 +136,8 @@ def benchmark_gmm(
 
     in_dtype_str = str_from_dtype(in_dtype)
     out_dtype_str = str_from_dtype(out_dtype)
-    dtypes_desc = f"i{in_dtype_str}_o{out_dtype_str}"
+    group_sizes_dtype_str = str_from_group_sizes_dtype(group_sizes_dtype)
+    dtypes_desc = f"i{in_dtype_str}_o{out_dtype_str}_g{group_sizes_dtype_str}"
     layout_desc = (
         "".join("t" if trans else "n" for trans in (trans_lhs, trans_rhs)) + "n"
     )
@@ -165,6 +172,7 @@ def benchmark_gmm(
             rng_seed=rng_seed,
             unif_group_sizes=unif_group_sizes,
             use_bias=use_bias,
+            group_sizes_dtype=group_sizes_dtype,
         )
 
         quantiles = [0.5, 0.2, 0.8]
@@ -283,6 +291,10 @@ def benchmark_gmm(
         "  num_group_sizes = %d, unif_group_sizes = %s",
         num_group_sizes,
         unif_group_sizes,
+    )
+    logging.info(
+        "  group_sizes_dtype = %s",
+        group_sizes_dtype_str,
     )
     logging.info(
         "  metric = %s (in %s)",
@@ -407,6 +419,13 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="evenly distributes tokens among all groups",
     )
+    parser.add_argument(
+        "--group-sizes-type",
+        type=str.lower,
+        choices=SUPPORTED_GROUP_SIZES_DTYPES_STR,
+        default=GROUP_SIZES_DTYPE_STR,
+        help=f"group sizes data type (default: {GROUP_SIZES_DTYPE_STR})",
+    )
 
     # Benchmark metric
     parser.add_argument(
@@ -460,6 +479,7 @@ def main() -> None:
     shape = (args.M, args.K, args.N, args.G)
     in_dtype = dtype_from_str(args.input_type)
     out_dtype = dtype_from_str(args.output_type)
+    group_sizes_dtype = group_sizes_dtype_from_str(args.group_sizes_type)
 
     benchmark_gmm(
         args.gmm_type,
@@ -475,6 +495,7 @@ def main() -> None:
         use_bias=args.use_bias,
         accumulate=args.accumulate,
         output=args.o,
+        group_sizes_dtype=group_sizes_dtype,
     )
 
 

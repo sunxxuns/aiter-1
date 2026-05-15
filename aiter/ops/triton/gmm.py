@@ -102,7 +102,8 @@ def gmm(
         rhs must be on the same device of lhs and group_sizes.
     group_sizes : torch.Tensor
         1D input tensor describing group sizes. Shape: (G,).
-        group_sizes data type must be torch.int32 and all its elements must be non-negative.
+        group_sizes data type must be torch.int32 or torch.int64, and all its elements must be
+        non-negative.
         group_sizes must be on the same device of lhs and rhs.
     preferred_element_type : torch.dtype, optional
         Desired data type for output tensor. Default is torch.bfloat16.
@@ -281,7 +282,8 @@ def ptgmm(
         rhs must be on the same device of lhs and group_sizes.
     group_sizes : torch.Tensor
         1D input tensor describing group sizes. Shape: (G,).
-        group_sizes data type must be torch.int32 and all its elements must be non-negative.
+        group_sizes data type must be torch.int32 or torch.int64, and all its elements must be
+        non-negative.
         group_sizes must be on the same device of lhs and rhs.
     preferred_element_type : torch.dtype, optional
         Desired data type for output tensor. Default is torch.bfloat16.
@@ -464,7 +466,8 @@ def nptgmm(
         rhs must be on the same device of lhs and group_sizes.
     group_sizes : torch.Tensor
         1D input tensor describing group sizes. Shape: (G,).
-        group_sizes data type must be torch.int32 and all its elements must be non-negative.
+        group_sizes data type must be torch.int32 or torch.int64, and all its elements must be
+        non-negative.
         group_sizes must be on the same device of lhs and rhs.
     preferred_element_type : torch.dtype, optional
         Desired data type for output tensor. Default is torch.bfloat16.
