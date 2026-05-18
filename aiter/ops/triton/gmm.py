@@ -53,15 +53,16 @@ def _gmm_grid(
     assert is_power_of_2(
         block_size_n
     ), f"N-dimension tile size must be a power of 2 (it's {block_size_n})."
-    assert torch.all(group_sizes >= 0).item(), "All group_sizes must be non-negative."
+    # assert torch.all(group_sizes >= 0).item(), "All group_sizes must be non-negative."
     assert grid_dim > 0, f"Grid dimension must be positive (it's {grid_dim})."
-    num_m_tiles = (group_sizes + block_size_m - 1) // block_size_m
-    assert torch.all(num_m_tiles >= 0).item(), "All num_m_tiles must be non-negative."
+    # num_m_tiles = (group_sizes + block_size_m - 1) // block_size_m
+    # assert torch.all(num_m_tiles >= 0).item(), "All num_m_tiles must be non-negative."
     num_n_tiles = triton.cdiv(N, block_size_n)
     assert num_n_tiles > 0, f"num_n_tiles must be positive, it's {num_n_tiles}."
-    num_tiles = torch.sum(num_m_tiles * num_n_tiles).item()
-    assert num_tiles > 0, f"num_tiles must be positive, it's {num_tiles}."
-    num_programs = int(min(grid_dim, num_tiles))
+    # num_tiles = torch.sum(num_m_tiles * num_n_tiles).item()
+    # assert num_tiles > 0, f"num_tiles must be positive, it's {num_tiles}."
+    # num_programs = int(min(grid_dim, num_tiles))
+    num_programs = grid_dim
     assert num_programs > 0, f"num_programs must be positive, it's {num_programs}."
     return (num_programs,)
 
