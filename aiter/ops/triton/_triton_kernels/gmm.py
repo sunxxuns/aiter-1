@@ -137,7 +137,7 @@ def _process_gmm_tile(
             lhs = tl.load(lhs_ptrs, mask=offs_k[None, :] < k_mask_limit, other=0)
             rhs = tl.load(rhs_ptrs, mask=offs_k[:, None] < k_mask_limit, other=0)
 
-        acc += tl.dot(lhs, rhs)
+        acc = tl.dot(lhs, rhs, acc=acc)
 
         lhs_ptrs += BLOCK_SIZE_K
 
