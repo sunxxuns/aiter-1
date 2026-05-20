@@ -1,44 +1,66 @@
 import torch
 
-device = "cpu"
-gs_dtype = torch.int64
-M = 267424
-K = 1280
-N = 2560
-G = 32
-
-gs_list = [M // G] * G
-gs_list[-1] += M % G
-group_sizes = torch.tensor(gs_list, dtype=gs_dtype, device=device)
-
-BLOCK_SIZE_M = 256
-BLOCK_SIZE_K = 64
-BLOCK_SIZE_N = 256
-
 
 def cdiv(x, y):
     return (x + y - 1) // y
 
 
+def next_power_of_2(n):
+    n -= 1
+    n |= n >> 1
+    n |= n >> 2
+    n |= n >> 4
+    n |= n >> 8
+    n |= n >> 16
+    n |= n >> 32
+    n += 1
+    return n
+
+
+device = "cpu"
+gs_dtype = torch.int64
+M = 267424
+K = 1280
+N = 2560
+# original G is 32, testing with an odd / non-power-of-2 G
+G = 13  # 32
+G_POW2 = next_power_of_2(G)
+
+gs_list = [M // G] * G
+gs_list[-1] += M % G
+group_sizes = torch.tensor(gs_list, dtype=gs_dtype, device=device)
+assert torch.sum(group_sizes) == M
+
+BLOCK_SIZE_M = 256
+BLOCK_SIZE_K = 64
+BLOCK_SIZE_N = 256
+
 tile = 1983
 
-cumsum_m = torch.cumsum(group_sizes, dim=0)
-num_m_tiles = cdiv(group_sizes, BLOCK_SIZE_M)
+g_range = torch.arange(G_POW2, device=device)
+g_mask = g_range < G
+zeros = torch.zeros((G_POW2,), dtype=gs_dtype, device=device)
+
+# emulate tl.load, with a power-of-2 tensor
+loaded_group_sizes = zeros.clone()
+loaded_group_sizes[:G] = group_sizes
+assert torch.sum(loaded_group_sizes) == M
+
+cumsum_m = torch.where(g_mask, torch.cumsum(loaded_group_sizes, dim=0), zeros)
+num_m_tiles = cdiv(loaded_group_sizes, BLOCK_SIZE_M)
 num_n_tiles = cdiv(N, BLOCK_SIZE_N)
 num_tiles = num_m_tiles * num_n_tiles
-cumsum_tile = torch.cumsum(num_tiles, dim=0)
-g = torch.sum(cumsum_tile <= tile)
-g_range = torch.arange(G)
+cumsum_tile = torch.where(g_mask, torch.cumsum(num_tiles, dim=0), zeros)
+g = torch.sum((cumsum_tile <= tile) & g_mask)
 prev_mask = g_range < g
-zeros = torch.zeros((G,), dtype=gs_dtype)
-prev_cumsum_m = torch.where(prev_mask, cumsum_m, zeros).max()
-prev_cumsum_tile = torch.where(prev_mask, cumsum_tile, zeros).max()
-g_cumsum_m = torch.where(g_range == g, cumsum_m, zeros).max()
+prev_cumsum_m = torch.max(torch.where(prev_mask, cumsum_m, zeros))
+prev_cumsum_tile = torch.max(torch.where(prev_mask, cumsum_tile, zeros))
+g_cumsum_m = torch.max(torch.where(g_range == g, cumsum_m, zeros))
 m = g_cumsum_m - prev_cumsum_m
 num_m_tiles_out = cdiv(m, BLOCK_SIZE_M)
 tile_in_mm = tile - prev_cumsum_tile
 
-print("group_sizes", group_sizes)
+print("group_sizes", loaded_group_sizes)
 print("cumsum_m", cumsum_m)
 print("num_m_tiles", num_m_tiles)
 print("num_n_tiles", num_n_tiles)
