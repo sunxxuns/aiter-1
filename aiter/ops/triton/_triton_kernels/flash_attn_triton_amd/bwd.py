@@ -827,7 +827,7 @@ def _bwd_dq_inner_split(
             dp = tl.dot(do, vT)
 
         if ENABLE_DROPOUT:
-            dp = tl.where(dropout_mask, dp, 0.0) * dropout_scale
+            dp = dp * dropout_mask.to(dp.dtype) * dropout_scale
 
         # ds
         delta_i = Di[:, None]
@@ -967,7 +967,7 @@ def _bwd_dkdv_inner_split(
 
         # dV
         if ENABLE_DROPOUT:
-            pT_dropout = tl.where(dropout_mask, pT, 0.0) * dropout_scale
+            pT_dropout = pT * dropout_mask.to(pT.dtype) * dropout_scale
             dv = tl.dot(pT_dropout.to(do.type.element_ty), do, acc=dv)
         else:
             dv = tl.dot(pT.to(do.type.element_ty), do, acc=dv)
@@ -982,7 +982,7 @@ def _bwd_dkdv_inner_split(
             dpT = tl.dot(v, tl.trans(do))
 
         if ENABLE_DROPOUT:
-            dpT = tl.where(dropout_mask, dpT, 0.0) * dropout_scale
+            dpT = dpT * dropout_mask.to(dpT.dtype) * dropout_scale
 
         delta_i = Di[None, :]
         dsT = pT * (dpT - delta_i)
@@ -1149,7 +1149,7 @@ def _bwd_dkdvdq_inner_atomic(
 
         # dV
         if ENABLE_DROPOUT:
-            pT_dropout = tl.where(dropout_mask, pT, 0.0) * dropout_scale
+            pT_dropout = pT * dropout_mask.to(pT.dtype) * dropout_scale
             dv = tl.dot(pT_dropout.to(do.type.element_ty), do, acc=dv)
         else:
             dv = tl.dot(pT.to(do.type.element_ty), do, acc=dv)
@@ -1164,7 +1164,7 @@ def _bwd_dkdvdq_inner_atomic(
             dpT = tl.dot(v, tl.trans(do))
 
         if ENABLE_DROPOUT:
-            dpT = tl.where(dropout_mask, dpT, 0.0) * dropout_scale
+            dpT = dpT * dropout_mask.to(dpT.dtype) * dropout_scale
 
         delta_i = Di[None, :]
         dsT = pT * (dpT - delta_i)
@@ -2936,7 +2936,7 @@ def _bwd_dkdv_inner(
         else:
             dpT = tl.dot(v, tl.trans(do))
         if ENABLE_DROPOUT:
-            dpT = tl.where(dropout_mask, dpT, 0.0) * dropout_scale
+            dpT = dpT * dropout_mask.to(dpT.dtype) * dropout_scale
         delta_i = Di[None, :]
         dsT = pT * (dpT - delta_i)
         if IS_FP8:
@@ -3098,7 +3098,7 @@ def _bwd_dq_inner(
         else:
             dp = tl.dot(do, vT)
         if ENABLE_DROPOUT:
-            dp = tl.where(dropout_mask, dp, 0.0) * dropout_scale
+            dp = dp * dropout_mask.to(dp.dtype) * dropout_scale
         delta_i = Di[:, None]
         ds = p * (dp - delta_i)
         # Compute dQ.
