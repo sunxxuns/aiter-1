@@ -195,7 +195,7 @@ def _attn_fwd_inner(
         if SLIDING_WINDOW > 0:
             k_pos = start_n + tl.arange(0, BLOCK_N)
             q_adj = OFFS_M + seqlen_k - seqlen_q
-            window_mask = k_pos[None, :] >= (q_adj[:, None] - SLIDING_WINDOW)
+            window_mask = k_pos[None, :] > (q_adj[:, None] - SLIDING_WINDOW)
             mask = mask & window_mask
 
         qk = tl.where(mask, qk, float("-inf"))
@@ -570,8 +570,11 @@ def _attn_fwd(
                     + cu_seqlens_q_start * stride_lse_m
                     + offs_m * stride_lse_m
                 )
-                lse_mask = offs_m < SEQLEN_Q
-                lse = tl.full([BLOCK_M], value=0.0, dtype=tl.float32)
+                lse_mask = offs_m < seqlen_q
+                if ENABLE_SINK:
+                    lse = tl.load(sink_ptr + off_q_head).to(tl.float32)
+                else:
+                    lse = tl.full([BLOCK_M], value=float("-inf"), dtype=tl.float32)
                 tl.store(softmax_lse_ptr + offs_lse, lse, mask=lse_mask)
                 # TODO: Should dropout and return encoded softmax be handled here too?
 
@@ -896,10 +899,9 @@ def _attn_fwd(
         # convert back to natural units
         softmax_lse *= LN2
 
-        if IS_CAUSAL:
-            # zero out nans caused by -infs when doing causal
+        if IS_CAUSAL and not ENABLE_SINK:
             lse_causal_mask = (start_m_idx + tl.arange(0, BLOCK_M)) < causal_start_idx
-            softmax_lse = tl.where(lse_causal_mask, 0.0, softmax_lse)
+            softmax_lse = tl.where(lse_causal_mask, float("-inf"), softmax_lse)
 
         # If seqlen_q not multiple of BLOCK_M, we need to mask out the last few rows.
         # This is only true for the last M block. For others, overflow_size will be -ve

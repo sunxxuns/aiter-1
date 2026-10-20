@@ -237,7 +237,7 @@ def _attn_qk(
             causal_boundary = key_pos + (seqlen_q - seqlen_k)
             mask = mask & (offs_m[:, None] >= causal_boundary[None, :])
         if SLIDING_WINDOW > 0:
-            mask = mask & (window_min[:, None] <= key_pos[None, :])
+            mask = mask & (window_min[:, None] < key_pos[None, :])
         qk = gl.where(mask, qk, float("-inf"))
 
     return qk
@@ -918,9 +918,15 @@ def _attn_fwd(
             gl.amd.cdna4.buffer_store(zeros, ptr=o_base, offsets=o_offsets, mask=o_mask)
 
             if softmax_lse_ptr is not None:
-                lse = gl.zeros(
-                    [BLOCK_M], dtype=gl.float32, layout=gl.SliceLayout(1, mfmaLayout)
-                )
+                if ENABLE_SINK:
+                    lse = gl.load(sink_ptr + off_q_head).to(gl.float32)
+                else:
+                    lse = gl.full(
+                        [BLOCK_M],
+                        float("-inf"),
+                        dtype=gl.float32,
+                        layout=gl.SliceLayout(1, mfmaLayout),
+                    )
                 gl.amd.cdna4.buffer_store(
                     lse, ptr=lse_base, offsets=offs_lse, mask=lse_mask
                 )
@@ -939,7 +945,7 @@ def _attn_fwd(
     # partially outside the window, so we keep the per-element mask below.
     skipped_blocks = 0
     if SLIDING_WINDOW > 0:
-        window_start_n = start_m * BLOCK_M + seqlen_k - seqlen_q - SLIDING_WINDOW
+        window_start_n = start_m * BLOCK_M + seqlen_k - seqlen_q - SLIDING_WINDOW + 1
         skipped_blocks = min(max(window_start_n, 0) // BLOCK_N, n_blocks)
 
     if IS_CAUSAL:
@@ -1098,9 +1104,13 @@ def _attn_fwd(
         # convert back to natural units
         softmax_lse = softmax_lse * LN2
 
-        if IS_CAUSAL:
-            # zero out nans caused by -infs when doing causal
-            softmax_lse = gl.where(offs_m < causal_start_idx, 0.0, softmax_lse)
+        if SLIDING_WINDOW > 0:
+            softmax_lse = gl.where(m_i == -1.0e30, float("-inf"), softmax_lse)
+
+        if IS_CAUSAL and not ENABLE_SINK:
+            softmax_lse = gl.where(
+                offs_m < causal_start_idx, float("-inf"), softmax_lse
+            )
 
         gl.amd.cdna4.buffer_store(
             softmax_lse, ptr=lse_base, offsets=offs_lse, mask=lse_mask

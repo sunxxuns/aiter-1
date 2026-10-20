@@ -276,7 +276,7 @@ def _bwd_dkdv_inner(
                 )
             pT = tl.where(mask, pT, 0.0)
         if SLIDING_WINDOW > 0:
-            window_mask = offs_n[:, None] >= (
+            window_mask = offs_n[:, None] > (
                 offs_m[None, :] - delta_qk - SLIDING_WINDOW
             )
             pT = tl.where(window_mask, pT, 0.0)
@@ -487,7 +487,7 @@ def _bwd_dq_inner(
             mask = causal_mask & mask_mn
             p = tl.where(mask, p, 0.0)
         if SLIDING_WINDOW > 0:
-            window_mask = offs_n[None, :] >= (
+            window_mask = offs_n[None, :] > (
                 offs_m[:, None] - delta_qk - SLIDING_WINDOW
             )
             p = tl.where(window_mask, p, 0.0)
@@ -944,7 +944,10 @@ def bwd_kernel_causal(  # grid = (tl.cdiv(max_seqlen_q // BLOCK_M2), batch, nhea
             start_m += num_steps * MASK_BLOCK_M1
             end_m = seqlen_q
             if SLIDING_WINDOW > 0:
-                end_m = min(start_n + BLOCK_N1 + delta_qk + SLIDING_WINDOW, seqlen_q)
+                end_m = min(
+                    start_n + BLOCK_N1 + delta_qk + SLIDING_WINDOW - 1,
+                    seqlen_q,
+                )
             num_steps = tl.cdiv(max(end_m - start_m, 0), BLOCK_M1)
             end_m = start_m + num_steps * BLOCK_M1
 
@@ -1165,6 +1168,7 @@ def bwd_kernel_causal(  # grid = (tl.cdiv(max_seqlen_q // BLOCK_M2), batch, nhea
             window_start_n = 0
             if SLIDING_WINDOW > 0:
                 window_start_n = max(start_m - delta_qk - SLIDING_WINDOW, 0)
+                window_start_n = max(window_start_n + 1, 0)
             start_n = window_start_n // BLOCK_N2 * BLOCK_N2
             num_steps = tl.cdiv(max(end_n - start_n, 0), BLOCK_N2)
             if DEBUG_TRITON:

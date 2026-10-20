@@ -188,7 +188,7 @@ def mha_set_swizzle(value: Literal["default", "spatial"]):
 
 
 def _get_sliding_window_size(window_size: tuple[int, int]) -> int:
-    return max(int(window_size[0]), 0)
+    return max(int(window_size[0]) + 1, 0)
 
 
 def gluon_forward_unsupported_reason(
@@ -520,7 +520,7 @@ def _flash_attn_forward(
         raise ValueError("Bias is not supported yet in the Triton Backend")
     if _MHA_IMPL != "dao_ai" and window_size_right != -1:
         raise ValueError("window_size_right is not supported yet in the Triton Backend")
-    sliding_window = max(window_size_left, 0)
+    sliding_window = _get_sliding_window_size((window_size_left, window_size_right))
 
     # Triton cannot specialize on numpy scalar types; ensure native Python int
     max_seqlen_q = int(max_seqlen_q)
@@ -1060,6 +1060,9 @@ def flash_attn_func(
             pattern (negative means that location was dropped, nonnegative means it was kept).
     """
     backend = _resolve_backend(backend)
+    if int(window_size[1]) == 0:
+        window_size = (int(window_size[0]), -1)
+        causal = True
     _LOGGER.info(
         "FLASH_ATTN [%s]:  q=%s  k=%s  v=%s",
         backend,
@@ -1415,6 +1418,9 @@ def flash_attn_varlen_func(
             pattern (negative means that location was dropped, nonnegative means it was kept).
     """
     backend = _resolve_backend(backend)
+    if int(window_size[1]) == 0:
+        window_size = (int(window_size[0]), -1)
+        causal = True
     _LOGGER.info(
         "FLASH_ATTN_VARLEN [%s]:  q=%s  k=%s  v=%s",
         backend,
@@ -1536,6 +1542,9 @@ def flash_attn_with_kvcache(
         )
 
     softmax_scale = _get_softmax_scale(q, softmax_scale)
+    if int(window_size[1]) == 0:
+        window_size = (int(window_size[0]), -1)
+        causal = True
 
     if cache_seqlens is not None and isinstance(cache_seqlens, int):
         cache_seqlens = torch.full(

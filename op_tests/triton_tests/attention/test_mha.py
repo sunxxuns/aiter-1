@@ -6,6 +6,7 @@ import pytest
 import torch
 
 from aiter import logger
+from aiter.ops.triton.attention import mha as mha_module
 from aiter.ops.triton.attention.mha import (
     flash_attn_func,
     flash_attn_varlen_func,
@@ -712,6 +713,249 @@ def test_mha_varlen_return_lse_softmax(
 #   HQ=32, HK=8:  Llama 3 8B (GQA 4:1)
 #   HQ=64, HK=8:  Llama 3 70B (GQA 8:1)
 #   HQ=32, HK=32: Llama 2 7B (MHA)
+
+
+def _make_varlen_inputs(q_lengths, k_lengths, nheads, head_size):
+    torch.manual_seed(20)
+    q = torch.randn(
+        sum(q_lengths), nheads, head_size, device="cuda", dtype=torch.bfloat16
+    )
+    k = torch.randn(
+        sum(k_lengths), nheads, head_size, device="cuda", dtype=torch.bfloat16
+    )
+    v = torch.randn_like(k)
+    cu_seqlens_q = (
+        torch.tensor([0, *q_lengths], device="cuda").cumsum(0).to(torch.int32)
+    )
+    cu_seqlens_k = torch.tensor([0, *k_lengths], device="cuda").cumsum(0).int()
+    return q, k, v, cu_seqlens_q, cu_seqlens_k
+
+
+def _varlen_reference(q, k, v, cu_seqlens_q, cu_seqlens_k, causal):
+    outputs = []
+    lses = []
+    for q_start, q_end, k_start, k_end in zip(
+        cu_seqlens_q[:-1], cu_seqlens_q[1:], cu_seqlens_k[:-1], cu_seqlens_k[1:]
+    ):
+        if k_start == k_end:
+            outputs.append(torch.zeros_like(q[q_start:q_end]))
+            lses.append(torch.full_like(q[q_start:q_end, :, 0], float("-inf")))
+            continue
+        q_seq = q[q_start:q_end].unsqueeze(0)
+        k_seq = k[k_start:k_end].unsqueeze(0)
+        v_seq = v[k_start:k_end].unsqueeze(0)
+        out, _, lse = attention_ref(q_seq, k_seq, v_seq, causal=causal)
+        outputs.append(out[0])
+        lses.append(lse[0].transpose(0, 1))
+    return torch.cat(outputs), torch.cat(lses)
+
+
+@pytest.mark.parametrize("backend", ["triton", "gluon"])
+@pytest.mark.parametrize(
+    "SEQLEN_Q, SEQLEN_K", [(512, 128), (300, 128), (256, 64), (129, 1)]
+)
+def test_mha_fully_masked_lse(backend, SEQLEN_Q, SEQLEN_K):
+    skip_if_gluon_unsupported(backend)
+    torch.manual_seed(20)
+    q = torch.randn(2, SEQLEN_Q, 2, 64, device="cuda", dtype=torch.bfloat16)
+    k = torch.randn(2, SEQLEN_K, 2, 64, device="cuda", dtype=torch.bfloat16)
+    v = torch.randn_like(k)
+
+    output, lse = flash_attn_func(
+        q, k, v, causal=True, return_lse=True, backend=backend
+    )
+    _, _, lse_ref = attention_ref(q, k, v, causal=True)
+    masked_rows = SEQLEN_Q - SEQLEN_K
+
+    assert torch.isfinite(output).all()
+    assert output[:, :masked_rows].abs().max().item() == 0.0
+    assert torch.isneginf(lse[:, :, :masked_rows]).all()
+    assert torch.isfinite(lse[:, :, masked_rows:]).all()
+    assert torch.equal(lse[:, :, :masked_rows], lse_ref[:, :, :masked_rows])
+
+
+@pytest.mark.parametrize("backend", ["triton", "gluon"])
+@pytest.mark.parametrize(
+    "q_lengths, k_lengths",
+    [([2, 3], [0, 4]), ([128, 1, 256], [0, 1, 256])],
+)
+def test_mha_varlen_fully_masked_lse(backend, q_lengths, k_lengths):
+    skip_if_gluon_unsupported(backend)
+    q, k, v, cu_seqlens_q, cu_seqlens_k = _make_varlen_inputs(
+        q_lengths, k_lengths, 2, 64
+    )
+
+    output, lse = flash_attn_varlen_func(
+        q,
+        k,
+        v,
+        cu_seqlens_q,
+        cu_seqlens_k,
+        max(q_lengths),
+        max(k_lengths),
+        causal=True,
+        return_lse=True,
+        backend=backend,
+    )
+    _output_ref, lse_ref = _varlen_reference(
+        q, k, v, cu_seqlens_q, cu_seqlens_k, causal=True
+    )
+
+    assert torch.isfinite(output).all()
+    finite = torch.isfinite(lse_ref)
+    assert torch.isfinite(lse[finite]).all()
+    assert torch.equal(lse[~finite], lse_ref[~finite])
+
+
+@pytest.mark.parametrize("backend", ["triton", "gluon"])
+@pytest.mark.parametrize("SEQLEN_Q, SEQLEN_K", [(512, 128), (300, 128), (129, 1)])
+def test_mha_fully_masked_lse_sink(backend, SEQLEN_Q, SEQLEN_K):
+    skip_if_gluon_unsupported(backend)
+    torch.manual_seed(20)
+    q = torch.randn(2, SEQLEN_Q, 2, 64, device="cuda", dtype=torch.bfloat16)
+    k = torch.randn(2, SEQLEN_K, 2, 64, device="cuda", dtype=torch.bfloat16)
+    v = torch.randn_like(k)
+    sink = torch.randn(2, device="cuda", dtype=torch.float32)
+
+    output, lse = flash_attn_func(
+        q, k, v, causal=True, return_lse=True, sink=sink, backend=backend
+    )
+    masked_rows = SEQLEN_Q - SEQLEN_K
+
+    assert torch.isfinite(output).all()
+    assert output[:, :masked_rows].abs().max().item() == 0.0
+    torch.testing.assert_close(
+        lse[:, :, :masked_rows],
+        sink.view(1, -1, 1).expand(2, 2, masked_rows),
+        atol=1e-5,
+        rtol=1e-5,
+    )
+
+
+@pytest.mark.parametrize("backend", ["triton", "gluon"])
+@pytest.mark.parametrize("window_size_left", [-1, 0, 2])
+@pytest.mark.parametrize("SEQLEN_Q, SEQLEN_K", [(2, 5), (5, 2)])
+@pytest.mark.parametrize("varlen", [False, True])
+def test_mha_right_window_zero_matches_causal(
+    varlen, SEQLEN_Q, SEQLEN_K, window_size_left, backend
+):
+    skip_if_gluon_unsupported(backend)
+    torch.manual_seed(20)
+    nheads, head_size = 2, 64
+    requires_grad = backend == "triton"
+    if varlen:
+        q = torch.randn(
+            SEQLEN_Q, nheads, head_size, device="cuda", dtype=torch.bfloat16
+        )
+        k = torch.randn(
+            SEQLEN_K, nheads, head_size, device="cuda", dtype=torch.bfloat16
+        )
+        v = torch.randn_like(k)
+        cu_seqlens_q = torch.tensor([0, SEQLEN_Q], device="cuda", dtype=torch.int32)
+        cu_seqlens_k = torch.tensor([0, SEQLEN_K], device="cuda", dtype=torch.int32)
+        do = torch.randn_like(q)
+
+        def run(causal, window_size):
+            local_q = q.clone().requires_grad_(requires_grad)
+            local_k = k.clone().requires_grad_(requires_grad)
+            local_v = v.clone().requires_grad_(requires_grad)
+            out, lse = flash_attn_varlen_func(
+                local_q,
+                local_k,
+                local_v,
+                cu_seqlens_q,
+                cu_seqlens_k,
+                SEQLEN_Q,
+                SEQLEN_K,
+                causal=causal,
+                window_size=window_size,
+                return_lse=True,
+                backend=backend,
+            )
+            grads = (
+                torch.autograd.grad(out, (local_q, local_k, local_v), do)
+                if requires_grad
+                else None
+            )
+            return out, lse, grads
+
+    else:
+        q = torch.randn(
+            1, SEQLEN_Q, nheads, head_size, device="cuda", dtype=torch.bfloat16
+        )
+        k = torch.randn(
+            1, SEQLEN_K, nheads, head_size, device="cuda", dtype=torch.bfloat16
+        )
+        v = torch.randn_like(k)
+        do = torch.randn_like(q)
+
+        def run(causal, window_size):
+            local_q = q.clone().requires_grad_(requires_grad)
+            local_k = k.clone().requires_grad_(requires_grad)
+            local_v = v.clone().requires_grad_(requires_grad)
+            out, lse = flash_attn_func(
+                local_q,
+                local_k,
+                local_v,
+                causal=causal,
+                window_size=window_size,
+                return_lse=True,
+                backend=backend,
+            )
+            grads = (
+                torch.autograd.grad(out, (local_q, local_k, local_v), do)
+                if requires_grad
+                else None
+            )
+            return out, lse, grads
+
+    previous_fused_bwd = mha_module._USE_FUSED_BWD_KERNEL
+    mha_set_use_fused_bwd_kernel(False)
+    try:
+        window_result = run(False, (window_size_left, 0))
+        causal_result = run(True, (window_size_left, -1))
+    finally:
+        mha_set_use_fused_bwd_kernel(previous_fused_bwd)
+
+    assert torch.equal(window_result[0], causal_result[0])
+    assert torch.equal(window_result[1], causal_result[1])
+    if window_result[2] is not None:
+        for window_grad, causal_grad in zip(window_result[2], causal_result[2]):
+            assert torch.equal(window_grad, causal_grad)
+
+
+@pytest.mark.parametrize("window_size_left", [-1, 0, 2])
+@pytest.mark.parametrize("SEQLEN_Q, SEQLEN_K", [(2, 5), (5, 2)])
+def test_mha_with_kvcache_right_window_zero_matches_causal(
+    SEQLEN_Q, SEQLEN_K, window_size_left
+):
+    torch.manual_seed(20)
+    nheads, head_size = 2, 64
+    q = torch.randn(1, SEQLEN_Q, nheads, head_size, device="cuda", dtype=torch.bfloat16)
+    k_cache = torch.randn(
+        1, SEQLEN_K, nheads, head_size, device="cuda", dtype=torch.bfloat16
+    )
+    v_cache = torch.randn_like(k_cache)
+
+    def run(causal, window_size):
+        return mha_module.flash_attn_with_kvcache(
+            q,
+            k_cache,
+            v_cache,
+            cache_seqlens=SEQLEN_K,
+            causal=causal,
+            window_size=window_size,
+            return_softmax_lse=True,
+        )
+
+    window_result = run(False, (window_size_left, 0))
+    causal_result = run(True, (window_size_left, -1))
+    assert window_result[0].shape == q.shape
+    assert window_result[1].shape == (1, nheads, SEQLEN_Q)
+    assert torch.equal(window_result[0], causal_result[0])
+    assert torch.equal(window_result[1], causal_result[1])
+
+
 @pytest.mark.parametrize("BATCH", [1, 4])
 @pytest.mark.parametrize("SEQLEN_Q", [512, 1024, 2048])
 @pytest.mark.parametrize("SEQLEN_K", [512, 1024, 2048])
